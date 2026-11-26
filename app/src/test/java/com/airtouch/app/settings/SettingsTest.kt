@@ -1,11 +1,15 @@
 package com.airtouch.app.settings
 
+import com.airtouch.app.control.ControlAction
+import com.airtouch.app.control.DefaultBindings
 import com.airtouch.app.media.TargetMode
+import com.airtouch.handcontrol.core.Finger
+import com.airtouch.handcontrol.core.GestureTrigger
+import com.airtouch.handcontrol.core.HandPose
+import com.airtouch.handcontrol.core.TouchKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.File
-import java.security.MessageDigest
 
 class SettingsTest {
     @Test
@@ -16,39 +20,55 @@ class SettingsTest {
                 sensitivity = 9f,
                 cooldownMs = 10,
                 holdMs = 9_000,
-                stabilizeMs = 1,
+                bindings = "garbage;hold:NOPE=PLAY_PAUSE;hold:FIST=NOT_AN_ACTION",
+                playbackSource = "nope",
                 targetMode = "nope",
                 manualPackage = "  ",
             ),
         )
         assertEquals(15, settings.targetFps)
         assertEquals(1.4f, settings.sensitivity)
-        assertEquals(400L, settings.cooldownMs)
-        assertEquals(2_000L, settings.holdMs)
-        assertEquals(200L, settings.stabilizeMs)
+        assertEquals(200L, settings.cooldownMs)
+        assertEquals(1_500L, settings.holdMs)
+        assertTrue(settings.bindings.isEmpty())
+        assertEquals(PlaybackSource.BUILT_IN, settings.playbackSource)
         assertEquals(TargetMode.AUTO, settings.targetMode)
         assertEquals(null, settings.manualPackage)
     }
 
     @Test
-    fun sensitivityKeepsPinchExitAboveEnter() {
-        listOf(0.7f, 1f, 1.4f).forEach { sensitivity ->
-            val config = defaultSettings().copy(sensitivity = sensitivity).toGestureConfig()
-            assertTrue(config.pinchExit > config.pinchEnter)
+    fun missingBindingsUseDefaults() {
+        assertEquals(DefaultBindings.map, sanitize(RawSettings()).bindings)
+    }
+
+    @Test
+    fun bindingsRoundTripIncludingAnEmptyMap() {
+        val bindings = mapOf(
+            GestureTrigger.Hold(HandPose.TWO) to ControlAction.NEXT,
+            GestureTrigger.Touch(Finger.RING, TouchKind.DOUBLE_TAP) to ControlAction.SEEK_FORWARD,
+            GestureTrigger.IndexClick to ControlAction.PLAY_PAUSE,
+        )
+        assertEquals(bindings, DefaultBindings.decode(DefaultBindings.encode(bindings)))
+        assertEquals(emptyMap<GestureTrigger, ControlAction>(), DefaultBindings.decode(DefaultBindings.encode(emptyMap())))
+    }
+
+    @Test
+    fun defaultsCoverTheRequestedGestures() {
+        val bound = DefaultBindings.map.keys
+        for (pose in listOf(HandPose.FIST, HandPose.TWO, HandPose.ONE, HandPose.PINKY, HandPose.THUMB_UP)) {
+            assertTrue("$pose is bound", GestureTrigger.Hold(pose) in bound)
+        }
+        for (finger in Finger.TOUCHABLE) {
+            assertTrue("$finger tap is bound", GestureTrigger.Touch(finger, TouchKind.TAP) in bound)
         }
     }
-}
 
-class ModelAssetTest {
     @Test
-    fun packagedHandLandmarkerMatchesThePinnedChecksum() {
-        val file = listOf(
-            File("src/main/assets/hand_landmarker.task"),
-            File("app/src/main/assets/hand_landmarker.task"),
-        ).firstOrNull { it.isFile } ?: error("hand landmarker asset is missing from ${File(".").absolutePath}")
-        assertEquals(7_819_105L, file.length())
-        val digest = MessageDigest.getInstance("SHA-256").digest(file.readBytes())
-        val hex = digest.joinToString("") { "%02x".format(it) }
-        assertEquals("fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1", hex)
+    fun sensitivityKeepsTouchExitAboveEnter() {
+        listOf(0.7f, 1f, 1.4f).forEach { sensitivity ->
+            val config = defaultSettings().copy(sensitivity = sensitivity).toHandConfig()
+            assertTrue(config.touchExit > config.touchEnter)
+            assertTrue(config.touchTipRatioExit >= config.touchTipRatioEnter)
+        }
     }
 }

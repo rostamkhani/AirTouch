@@ -5,6 +5,11 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -20,15 +25,19 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         val container = (application as AirTouchApplication).container
         setContent {
             val viewModel = viewModel<AirTouchViewModel>(factory = AirTouchViewModel.factory(container))
             AirTouchTheme {
-                AirTouchApp(
-                    viewModel = viewModel,
-                    onStartService = ::startTracking,
-                    onStopService = ::stopTracking,
-                )
+                Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+                    AirTouchApp(
+                        viewModel = viewModel,
+                        onStartService = ::startTracking,
+                        onStopService = ::stopTracking,
+                        onUnlock = { sendToService(HandTrackingService.ACTION_UNLOCK) },
+                    )
+                }
             }
         }
     }
@@ -40,9 +49,9 @@ class MainActivity : ComponentActivity() {
         ContextCompat.startForegroundService(this, intent)
     }
 
-    private fun stopTracking() {
-        startService(
-            Intent(this, HandTrackingService::class.java).setAction(HandTrackingService.ACTION_STOP),
-        )
+    private fun stopTracking() = sendToService(HandTrackingService.ACTION_STOP)
+
+    private fun sendToService(action: String) {
+        runCatching { startService(Intent(this, HandTrackingService::class.java).setAction(action)) }
     }
 }

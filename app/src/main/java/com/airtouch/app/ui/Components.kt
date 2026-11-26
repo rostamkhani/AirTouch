@@ -1,40 +1,46 @@
 package com.airtouch.app.ui
 
-import android.view.Surface
-import androidx.camera.view.PreviewView
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
-import com.airtouch.app.camera.CameraPipeline
+import com.airtouch.handcontrol.HandControlSession
+import com.airtouch.handcontrol.core.HandControlState
+import com.airtouch.handcontrol.ui.HandCameraPreview
+import com.airtouch.handcontrol.ui.HandSkeletonOverlay
 
 @Composable
-fun ScreenColumn(content: @Composable () -> Unit) {
+fun ScreenColumn(content: @Composable ColumnScope.() -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        content()
-    }
+            .padding(horizontal = 16.dp, vertical = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        content = content,
+    )
 }
 
 @Composable
@@ -77,27 +83,62 @@ fun WideButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
 }
 
 @Composable
-fun CameraPreview(pipeline: CameraPipeline?, enabled: Boolean) {
-    if (!enabled || pipeline == null) {
-        Text("پیش‌نمایش خاموش است. اگر کنترل روشن باشد، تحلیل تصویر ادامه دارد.")
-        return
-    }
-    AndroidView(
-        factory = { context ->
-            PreviewView(context).apply {
-                scaleType = PreviewView.ScaleType.FILL_CENTER
-                implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                post {
-                    pipeline.setTargetRotation(display?.rotation ?: Surface.ROTATION_0)
-                    pipeline.setPreview(surfaceProvider)
-                }
-            }
-        },
+fun WideOutlinedButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
         modifier = Modifier
             .fillMaxWidth()
-            .height(320.dp),
-    )
-    DisposableEffect(pipeline) {
-        onDispose { pipeline.setPreview(null) }
+            .defaultMinSize(minHeight = 48.dp),
+    ) {
+        Text(text)
+    }
+}
+
+@Composable
+fun <T> ChoiceRow(options: List<Pair<T, String>>, selected: T, onSelect: (T) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        options.forEach { (value, label) ->
+            FilterChip(
+                selected = value == selected,
+                onClick = { onSelect(value) },
+                label = { Text(label) },
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+/**
+ * Live camera with the detected hand drawn on top. The box takes the analyzed frame's aspect
+ * ratio so preview and overlay use identical scaling.
+ */
+@Composable
+fun CameraWithHand(
+    session: HandControlSession?,
+    state: HandControlState,
+    showPreview: Boolean,
+    frameAspect: Float,
+) {
+    val aspect = frameAspect.takeIf { it.isFinite() && it > 0f } ?: (3f / 4f)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = 460.dp)
+            .aspectRatio(aspect, matchHeightConstraintsFirst = aspect > 1f)
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0xFF14232B)),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (session != null && showPreview) {
+            HandCameraPreview(session, Modifier.matchParentSize())
+        } else {
+            Text(
+                if (session == null) "دوربین خاموش است" else "پیش‌نمایش خاموش است؛ فقط اسکلت دست نشان داده می‌شود",
+                color = Color.White,
+                modifier = Modifier.padding(24.dp),
+            )
+        }
+        HandSkeletonOverlay(state, Modifier.matchParentSize())
     }
 }

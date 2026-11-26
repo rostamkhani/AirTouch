@@ -24,7 +24,6 @@ class MediaSessionRepository(
     private var callback: MediaController.Callback? = null
     private var lastPackage: String? = null
     private var settings: AppSettings? = null
-    var onTargetChanged: (() -> Unit)? = null
 
     private val sessionListener = MediaSessionManager.OnActiveSessionsChangedListener { list ->
         replace(list.orEmpty())
@@ -57,7 +56,7 @@ class MediaSessionRepository(
         val changed = settings?.targetMode != newSettings.targetMode ||
             settings?.manualPackage != newSettings.manualPackage
         settings = newSettings
-        if (changed) selectActive(forceReset = true)
+        if (changed) selectActive()
     }
 
     fun refresh() {
@@ -74,10 +73,10 @@ class MediaSessionRepository(
 
     private fun replace(list: List<MediaController>) {
         controllers = list
-        selectActive(forceReset = false)
+        selectActive()
     }
 
-    private fun selectActive(forceReset: Boolean) {
+    private fun selectActive() {
         val currentSettings = settings
         val snapshots = controllers.map { it.toSnapshot() }
         val chosen = if (currentSettings == null) {
@@ -102,7 +101,6 @@ class MediaSessionRepository(
                 callback = null
             }
             if (next != null) lastPackage = next.packageName
-            if (forceReset || previousKey != next?.key()) onTargetChanged?.invoke()
         }
         publish(snapshots)
     }

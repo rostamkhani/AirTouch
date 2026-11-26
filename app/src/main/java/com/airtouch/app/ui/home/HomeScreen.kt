@@ -1,20 +1,28 @@
 package com.airtouch.app.ui.home
 
-import androidx.compose.foundation.layout.defaultMinSize
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.text.TextStyle
-import com.airtouch.app.service.ExecutionMode
+import com.airtouch.app.player.PlayerUiState
+import com.airtouch.app.service.CommandRecord
 import com.airtouch.app.service.MediaUiState
 import com.airtouch.app.service.ServicePhase
+import com.airtouch.app.settings.PlaybackSource
+import com.airtouch.app.ui.ChoiceRow
 import com.airtouch.app.ui.InfoCard
 import com.airtouch.app.ui.ScreenColumn
 import com.airtouch.app.ui.WideButton
+import com.airtouch.app.ui.WideOutlinedButton
 import com.airtouch.app.ui.labelFa
+import com.airtouch.handcontrol.PersianLabels
+import com.airtouch.handcontrol.core.HandControlState
 
 @Composable
 fun HomeScreen(
@@ -22,65 +30,81 @@ fun HomeScreen(
     status: String,
     error: String?,
     cameraMessage: String?,
+    hand: HandControlState,
+    locked: Boolean,
+    source: PlaybackSource,
+    player: PlayerUiState,
     media: MediaUiState,
-    executionMode: ExecutionMode,
-    handSeen: Boolean,
+    lastCommand: CommandRecord?,
+    onSource: (PlaybackSource) -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
-    onEnableControl: () -> Unit,
-    onOpenCamera: () -> Unit,
-    onOpenGestures: () -> Unit,
+    onUnlock: () -> Unit,
     onOpenLab: () -> Unit,
+    onOpenGestures: () -> Unit,
+    onOpenPlayer: () -> Unit,
     onOpenMedia: () -> Unit,
+    onOpenCamera: () -> Unit,
 ) {
     ScreenColumn {
-        Text("AirTouch", style = androidx.compose.material3.MaterialTheme.typography.displaySmall)
-        InfoCard("وضعیت دوربین", phase.labelFa() + "؛ " + status)
+        Text("AirTouch", style = MaterialTheme.typography.displaySmall)
+        InfoCard("کنترل حرکتی", phase.labelFa() + "؛ " + status)
         if (!error.isNullOrBlank()) InfoCard("خطا", error)
         if (!cameraMessage.isNullOrBlank()) InfoCard("دوربین", cameraMessage)
-        InfoCard(
-            "دست",
-            if (phase != ServicePhase.RUNNING) "کنترل خاموش است" else if (handSeen) "دست دیده می‌شود" else "دستی در تصویر نیست",
-        )
-        val title = media.title ?: "آهنگی در دسترس نیست"
-        InfoCard("موسیقی", media.targetLabel ?: "پخش‌کننده‌ای انتخاب نشده")
-        Text(
-            text = title,
-            style = TextStyle(textDirection = TextDirection.Content),
-        )
-        Text(media.artist.orEmpty(), style = TextStyle(textDirection = TextDirection.Content))
-        Text(media.playbackLabel)
-        media.lastCommand?.let { command ->
-            val confirmed = when (command.confirmed) {
-                true -> "تغییر وضعیت دیده شد"
-                false -> "نتیجه تأیید نشد"
-                null -> "در انتظار نتیجه"
-            }
+        if (phase == ServicePhase.RUNNING) {
             InfoCard(
-                "آخرین فرمان",
-                "${command.name}: ${if (command.sent) "ارسال شد" else "ارسال نشد"}. $confirmed. ${command.detail}",
+                "دست",
+                when {
+                    hand.pose != null -> "${PersianLabels.symbol(hand.pose!!)}  ${PersianLabels.pose(hand.pose!!)}"
+                    else -> PersianLabels.quality(hand.quality)
+                },
             )
         }
-        if (executionMode == ExecutionMode.DRY_RUN) {
-            InfoCard("حالت آزمایش", "فرمان موسیقی ارسال نمی‌شود تا کنترل واقعی را روشن کنید.")
-            WideButton("فعال‌کردن کنترل واقعی", onClick = onEnableControl)
+        if (locked) {
+            InfoCard("قفل", "کنترل حرکتی قفل است. با همان حرکت قفل یا دکمه زیر باز می‌شود.")
+            WideOutlinedButton("باز کردن قفل", onClick = onUnlock)
         }
         if (phase == ServicePhase.RUNNING || phase == ServicePhase.STARTING) {
             WideButton("توقف کامل دوربین", onClick = onStop)
         } else {
             WideButton("شروع کنترل حرکتی", onClick = onStart)
         }
-        OutlinedButton(onClick = onOpenCamera, modifier = Modifier.defaultMinSize(minHeight = 48.dp)) {
-            Text("دوربین و حساسیت")
+
+        Text("فرمان‌ها برای", style = MaterialTheme.typography.titleMedium)
+        ChoiceRow(
+            options = listOf(PlaybackSource.BUILT_IN to "پخش‌کننده AirTouch", PlaybackSource.SYSTEM to "برنامه موسیقی دیگر"),
+            selected = source,
+            onSelect = onSource,
+        )
+        if (source == PlaybackSource.BUILT_IN) {
+            InfoCard(
+                "در حال پخش",
+                player.title?.let { "$it${if (player.isPlaying) "  (در حال پخش)" else ""}" } ?: "آهنگی بارگذاری نشده؛ از صفحه پخش‌کننده آهنگ اضافه کنید",
+            )
+        } else {
+            InfoCard("برنامه موسیقی", media.targetLabel ?: "پخش‌کننده‌ای پیدا نشد؛ دسترسی اعلان را بررسی کنید")
+            media.title?.let { Text(it, style = TextStyle(textDirection = TextDirection.Content)) }
         }
-        OutlinedButton(onClick = onOpenGestures, modifier = Modifier.defaultMinSize(minHeight = 48.dp)) {
-            Text("حرکت‌ها")
+        lastCommand?.let { command ->
+            val result = when {
+                !command.sent -> "اجرا نشد"
+                command.confirmed == true -> "انجام شد"
+                command.confirmed == false -> "ارسال شد ولی تغییری دیده نشد"
+                else -> "ارسال شد"
+            }
+            InfoCard("آخرین فرمان", "${command.gesture} ← ${command.name}: $result. ${command.detail}")
         }
-        OutlinedButton(onClick = onOpenLab, modifier = Modifier.defaultMinSize(minHeight = 48.dp)) {
-            Text("آزمایش دست")
-        }
-        OutlinedButton(onClick = onOpenMedia, modifier = Modifier.defaultMinSize(minHeight = 48.dp)) {
-            Text("وضعیت موسیقی")
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            androidx.compose.foundation.layout.Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                WideOutlinedButton("آزمایش حرکات", onClick = onOpenLab)
+                WideOutlinedButton("پخش‌کننده", onClick = onOpenPlayer)
+                WideOutlinedButton("دوربین", onClick = onOpenCamera)
+            }
+            androidx.compose.foundation.layout.Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                WideOutlinedButton("حرکات و فرمان‌ها", onClick = onOpenGestures)
+                WideOutlinedButton("برنامه‌های موسیقی", onClick = onOpenMedia)
+            }
         }
     }
 }
