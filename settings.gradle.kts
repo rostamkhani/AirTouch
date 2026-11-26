@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "AirTouch"
 include(":app")
+include(":handcontrol")
