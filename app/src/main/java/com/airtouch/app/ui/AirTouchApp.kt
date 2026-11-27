@@ -12,85 +12,92 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.airtouch.app.service.ExecutionMode
 import com.airtouch.app.service.MediaNotificationListener
 import com.airtouch.app.service.ServicePhase
 import com.airtouch.app.ui.camera.CameraScreen
-import com.airtouch.app.ui.diagnostics.DiagnosticsScreen
 import com.airtouch.app.ui.gestures.GesturesScreen
 import com.airtouch.app.ui.home.HomeScreen
+import com.airtouch.app.ui.lab.LabScreen
 import com.airtouch.app.ui.media.MediaScreen
+import com.airtouch.app.ui.player.PlayerScreen
+import com.airtouch.handcontrol.core.HandControlState
+import kotlinx.coroutines.flow.MutableStateFlow
 
-private enum class Page {
-    ONBOARDING,
-    HOME,
-    CAMERA,
-    GESTURES,
-    LAB,
-    MEDIA,
-}
+private enum class Page { ONBOARDING, HOME, LAB, GESTURES, PLAYER, MEDIA, CAMERA }
+
+private val emptyState = MutableStateFlow(HandControlState.EMPTY)
 
 @Composable
 fun AirTouchApp(
     viewModel: AirTouchViewModel,
     onStartService: (Boolean) -> Unit,
     onStopService: () -> Unit,
+    onUnlock: () -> Unit,
 ) {
     val context = LocalContext.current
+    val container = viewModel.container
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val phase by viewModel.runtime.phase.collectAsStateWithLifecycle()
     val status by viewModel.runtime.statusText.collectAsStateWithLifecycle()
     val error by viewModel.runtime.errorText.collectAsStateWithLifecycle()
-    val hand by viewModel.runtime.hand.collectAsStateWithLifecycle()
+    val session by viewModel.runtime.session.collectAsStateWithLifecycle()
     val media by viewModel.runtime.media.collectAsStateWithLifecycle()
-    val mode by viewModel.runtime.executionMode.collectAsStateWithLifecycle()
+    val lastCommand by viewModel.runtime.lastCommand.collectAsStateWithLifecycle()
     val allowBackground by viewModel.runtime.allowBackground.collectAsStateWithLifecycle()
     val thermal by viewModel.runtime.thermalText.collectAsStateWithLifecycle()
-    val resolution by viewModel.runtime.resolutionText.collectAsStateWithLifecycle()
-    val cameraFps by viewModel.runtime.cameraFps.collectAsStateWithLifecycle()
-    val analysisFps by viewModel.runtime.analysisFps.collectAsStateWithLifecycle()
     val cameraMessage by viewModel.runtime.cameraMessage.collectAsStateWithLifecycle()
-    var page by remember(settings.onboardingDone) {
+    val locked by viewModel.runtime.locked.collectAsStateWithLifecycle()
+    val recentTriggers by viewModel.runtime.recentTriggers.collectAsStateWithLifecycle()
+    val player by container.player.state.collectAsStateWithLifecycle()
+    val tracks by container.library.tracks.collectAsStateWithLifecycle()
+    val hand by (session?.state ?: emptyState).collectAsState()
+    val sessionStatus by (session?.status ?: MutableStateFlow(null)).collectAsState()
+
+    var page by rememberSaveable(settings.onboardingDone) {
         mutableStateOf(if (settings.onboardingDone) Page.HOME else Page.ONBOARDING)
     }
-    var pendingBackground by remember { mutableStateOf(true) }
 
     val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         onStartService(granted)
     }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (!granted) return@rememberLauncherForActivityResult
-        startAfterCamera(context, pendingBackground, notificationLauncher, onStartService)
+        if (granted) startAfterCamera(context, notificationLauncher, onStartService)
+    }
+    val start = {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            cameraLauncher.launch(Manifest.permission.CAMERA)
+        } else {
+            startAfterCamera(context, notificationLauncher, onStartService)
+        }
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(allowBackground, phase) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP && phase == ServicePhase.RUNNING && !allowBackground) {
-                onStopService()
-            }
+            if (event == Lifecycle.Event.ON_STOP && phase == ServicePhase.RUNNING && !allowBackground) onStopService()
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    LaunchedEffect(page) {
-        if (page == Page.LAB) viewModel.setExecutionMode(ExecutionMode.DRY_RUN)
+    DisposableEffect(Unit) {
+        container.player.connect()
+        onDispose { }
     }
     if (page != Page.HOME && page != Page.ONBOARDING) {
         BackHandler { page = Page.HOME }
@@ -108,52 +115,49 @@ fun AirTouchApp(
                     status = status,
                     error = error,
                     cameraMessage = cameraMessage,
+                    hand = hand,
+                    locked = locked,
+                    source = settings.playbackSource,
+                    player = player,
                     media = media,
-                    executionMode = mode,
-                    handSeen = hand.handPresent,
-                    onStart = {
-                        pendingBackground = true
-                        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-                            cameraLauncher.launch(Manifest.permission.CAMERA)
-                        } else {
-                            startAfterCamera(context, true, notificationLauncher, onStartService)
-                        }
-                    },
+                    lastCommand = lastCommand,
+                    onSource = viewModel::setSource,
+                    onStart = start,
                     onStop = onStopService,
-                    onEnableControl = { viewModel.setExecutionMode(ExecutionMode.CONTROL) },
-                    onOpenCamera = { page = Page.CAMERA },
-                    onOpenGestures = { page = Page.GESTURES },
+                    onUnlock = onUnlock,
                     onOpenLab = { page = Page.LAB },
+                    onOpenGestures = { page = Page.GESTURES },
+                    onOpenPlayer = { page = Page.PLAYER },
                     onOpenMedia = { page = Page.MEDIA },
+                    onOpenCamera = { page = Page.CAMERA },
                 )
-                Page.CAMERA -> CameraScreen(
-                    settings = settings,
-                    pipeline = viewModel.runtime.let { (context.applicationContext as com.airtouch.app.AirTouchApplication).container.cameraPipeline },
-                    resolution = resolution,
-                    cameraFps = cameraFps,
-                    analysisFps = analysisFps,
-                    thermal = thermal,
-                    message = cameraMessage,
+                Page.LAB -> LabScreen(
+                    session = session,
+                    state = hand,
+                    status = sessionStatus,
+                    showPreview = settings.showPreview,
+                    recentTriggers = recentTriggers,
+                    holdMs = settings.holdMs,
+                    onLabVisible = viewModel::setLabActive,
+                    onStart = start,
                     onBack = { page = Page.HOME },
-                    onFront = viewModel::setFrontCamera,
-                    onPreview = viewModel::setPreview,
-                    onFps = viewModel::setFps,
-                    onSensitivity = viewModel::setSensitivity,
                 )
                 Page.GESTURES -> GesturesScreen(
                     settings = settings,
                     onBack = { page = Page.HOME },
-                    onToggle = viewModel::setCommand,
+                    onBind = viewModel::bind,
+                    onHold = viewModel::setHold,
                     onCooldown = viewModel::setCooldown,
-                    onFeedback = viewModel::setFeedback,
-                    onReset = viewModel::resetSettings,
+                    onSensitivity = viewModel::setSensitivity,
+                    onReset = viewModel::resetGestures,
                 )
-                Page.LAB -> DiagnosticsScreen(
-                    settings = settings,
-                    pipeline = (context.applicationContext as com.airtouch.app.AirTouchApplication).container.cameraPipeline,
-                    hand = hand,
-                    cameraFps = cameraFps,
-                    analysisFps = analysisFps,
+                Page.PLAYER -> PlayerScreen(
+                    connection = container.player,
+                    library = container.library,
+                    state = player,
+                    tracks = tracks,
+                    source = settings.playbackSource,
+                    onSource = viewModel::setSource,
                     onBack = { page = Page.HOME },
                 )
                 Page.MEDIA -> MediaScreen(
@@ -161,9 +165,22 @@ fun AirTouchApp(
                     media = media,
                     listenerEnabled = listenerEnabled(context),
                     onBack = { page = Page.HOME },
+                    onSource = viewModel::setSource,
                     onMode = viewModel::setTargetMode,
                     onPackage = viewModel::setManualPackage,
                     onFallback = viewModel::setFallback,
+                )
+                Page.CAMERA -> CameraScreen(
+                    settings = settings,
+                    session = session,
+                    state = hand,
+                    status = sessionStatus,
+                    thermal = thermal,
+                    message = cameraMessage,
+                    onBack = { page = Page.HOME },
+                    onFront = viewModel::setFrontCamera,
+                    onPreview = viewModel::setPreview,
+                    onFps = viewModel::setFps,
                 )
             }
         }
@@ -176,15 +193,19 @@ private fun OnboardingScreen(onDone: () -> Unit) {
         PageTitle("قبل از شروع")
         InfoCard(
             "دوربین",
-            "AirTouch تصویر دست را فقط روی گوشی پردازش می‌کند. تصویر ذخیره یا ارسال نمی‌شود. دوربین فقط با دکمه شروع روشن می‌شود.",
+            "AirTouch تصویر دست را فقط روی همین گوشی پردازش می‌کند. تصویر ذخیره یا ارسال نمی‌شود. دوربین فقط با دکمه شروع روشن می‌شود.",
+        )
+        InfoCard(
+            "حرکات",
+            "همه فرمان‌ها با دست ثابت است: حالت‌هایی مثل مشت، عدد یک و دو، شست بالا، و لمس نوک شست با هر انگشت. در صفحه «آزمایش حرکات» می‌بینید برنامه هر حالت را درست می‌شناسد یا نه.",
         )
         InfoCard(
             "اعلان",
-            "برای ماندن کنترل وقتی برنامه موسیقی را باز می‌کنید، یک اعلان دائمی نشان داده می‌شود. مجوز نمایش اعلان با دسترسی خواندن اعلان‌ها فرق دارد.",
+            "برای ماندن کنترل وقتی از برنامه بیرون می‌روید، یک اعلان دائمی نشان داده می‌شود. مجوز نمایش اعلان با دسترسی خواندن اعلان‌ها فرق دارد.",
         )
         InfoCard(
             "موسیقی",
-            "کنترل پخش‌کننده‌های دیگر به روشن‌کردن دسترسی اعلان AirTouch در تنظیمات سیستم نیاز دارد. اگر آن را ندهید، آزمایش دست و صدای خود گوشی همچنان ممکن است.",
+            "AirTouch پخش‌کننده خودش را دارد. برای کنترل برنامه موسیقی دیگر، باید دسترسی اعلان AirTouch را در تنظیمات سیستم روشن کنید.",
         )
         WideButton("متوجه شدم", onClick = onDone)
     }
@@ -192,7 +213,6 @@ private fun OnboardingScreen(onDone: () -> Unit) {
 
 private fun startAfterCamera(
     context: Context,
-    wantsBackground: Boolean,
     notificationLauncher: androidx.activity.result.ActivityResultLauncher<String>,
     onStartService: (Boolean) -> Unit,
 ) {
@@ -201,10 +221,10 @@ private fun startAfterCamera(
         context,
         Manifest.permission.POST_NOTIFICATIONS,
     ) == PackageManager.PERMISSION_GRANTED
-    if (wantsBackground && needsNotification && !granted) {
+    if (needsNotification && !granted) {
         notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     } else {
-        onStartService(wantsBackground && granted)
+        onStartService(granted)
     }
 }
 

@@ -10,75 +10,78 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
+import androidx.lifecycle.lifecycleScope
 import com.airtouch.app.AirTouchApplication
 import com.airtouch.app.R
-import com.airtouch.app.camera.CameraPipeline
-import com.airtouch.app.gestures.EngineState
-import com.airtouch.app.gestures.GestureEngine
-import com.airtouch.app.gestures.HandSample
-import com.airtouch.app.handtracking.HandTracker
-import com.airtouch.app.settings.modelConfidence
-import com.airtouch.app.settings.toGestureConfig
+import com.airtouch.app.control.ControlAction
+import com.airtouch.app.settings.toHandConfig
+import com.airtouch.app.settings.trackerOptions
 import com.airtouch.app.ui.MainActivity
+import com.airtouch.handcontrol.HandControlSession
+import com.airtouch.handcontrol.PersianLabels
+import com.airtouch.handcontrol.core.Finger
+import com.airtouch.handcontrol.core.GestureDispatcher
+import com.airtouch.handcontrol.core.GestureTriggered
+import com.airtouch.handcontrol.core.HandEvent
+import com.airtouch.handcontrol.core.withHints
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
+/**
+ * Owns the camera while gesture control is on. Runs as a camera foreground service so control
+ * keeps working while another app is open; stops when the screen turns off or the user stops it.
+ */
 class HandTrackingService : LifecycleService() {
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val stopped = AtomicBoolean(false)
-    private val appContainer by lazy { (application as AirTouchApplication).container }
-    private val runtime by lazy { appContainer.runtime }
-    private lateinit var engine: GestureEngine
-    private lateinit var tracker: HandTracker
-    private var pipeline: CameraPipeline? = null
-    private var settingsJob: Job? = null
-    private var watchJob: Job? = null
+    private val container by lazy { (application as AirTouchApplication).container }
+    private val runtime by lazy { container.runtime }
+    private lateinit var session: HandControlSession
+    private lateinit var dispatcher: GestureDispatcher<ControlAction>
     private var started = false
     private var foregroundStarted = false
-    private var allowBackground = false
-    @Volatile private var generation = 0
-    private var pendingConfidence: Float? = null
-    private var appliedConfidence = -1f
+    private var jobs = mutableListOf<Job>()
     private var lastNotification = ""
-    private val cameraRate = RateCounter()
-    private val analysisRate = RateCounter()
     private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
     private var screenRegistered = false
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == Intent.ACTION_SCREEN_OFF) shutdown("screen")
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) shutdown(Reason.SCREEN)
+        }
+    }
+
+    private val eventListener: (HandEvent) -> Unit = { event ->
+        if (event is GestureTriggered) {
+            runtime.noteTrigger(event.trigger.id, SystemClock.uptimeMillis())
+            if (!runtime.labActive.value) {
+                dispatcher.onEvent(event)
+                runtime.locked.value = dispatcher.locked
+                refreshNotification()
+            }
         }
     }
 
     override fun onCreate() {
         super.onCreate()
-        engine = GestureEngine { event ->
-            mainHandler.post { appContainer.commandRouter.onGesture(event) }
+        session = HandControlSession(this, this)
+        session.addListener(eventListener)
+        dispatcher = GestureDispatcher(isRepeatable = { it.repeatable }) { action, trigger, _ ->
+            if (action == ControlAction.LOCK_TOGGLE) runtime.locked.value = dispatcher.locked
+            container.commandRouter.perform(action, PersianLabels.trigger(trigger))
         }
-        tracker = HandTracker(
-            context = this,
-            onSample = { sample -> mainHandler.post { onHand(sample) } },
-            onIdle = { mainHandler.post { onTrackerIdle() } },
-            onFailure = { message -> mainHandler.post { fail(message) } },
-        )
+        dispatcher.lockAction = ControlAction.LOCK_TOGGLE
+        dispatcher.setLocked(runtime.locked.value)
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(screenReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF), RECEIVER_NOT_EXPORTED)
         } else {
@@ -91,150 +94,119 @@ class HandTrackingService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         when (intent?.action) {
-            ACTION_STOP -> shutdown("user")
-            ACTION_SUSPEND -> engine.suspendFromUser(SystemClock.uptimeMillis())
-            ACTION_RESUME -> engine.resumeFromUser(SystemClock.uptimeMillis())
+            ACTION_STOP, ACTION_LOCK, ACTION_UNLOCK -> {
+                if (intent.action != ACTION_STOP) setLocked(intent.action == ACTION_LOCK)
+                if (intent.action == ACTION_STOP || !started) shutdown(Reason.USER)
+            }
             else -> {
-                allowBackground = intent?.getBooleanExtra(EXTRA_ALLOW_BACKGROUND, false) ?: false
-                runtime.allowBackground.value = allowBackground
-                if (!foregroundStarted) promote("در حال آماده‌سازی")
-                mainHandler.post { ensureStarted() }
+                if (stopped.get()) return START_NOT_STICKY
+                runtime.allowBackground.value = intent?.getBooleanExtra(EXTRA_ALLOW_BACKGROUND, false) ?: false
+                if (!foregroundStarted) promote()
+                if (!started) {
+                    started = true
+                    lifecycleScope.launch { begin() }
+                }
             }
         }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        shutdown("destroy")
+        shutdown(Reason.DESTROY)
         super.onDestroy()
     }
 
-    private fun ensureStarted() {
-        if (started || stopped.get()) return
-        started = true
+    private suspend fun begin() {
+        if (stopped.get()) return
         runtime.phase.value = ServicePhase.STARTING
         runtime.errorText.value = null
-        appContainer.mediaRepository.onTargetChanged = {
-            generation += 1
-            engine.setGeneration(generation)
-        }
-        if (!modelPresent()) {
-            fail("مدل تشخیص دست داخل برنامه پیدا نشد")
-            return
-        }
-        pipeline = CameraPipeline(
-            context = this,
-            lifecycleOwner = this,
-            onFrame = { bitmap, timestamp, front ->
-                runtime.resolutionText.value = "${bitmap.width}×${bitmap.height}"
-                runtime.cameraFps.value = cameraRate.mark(timestamp)
-                tracker.submit(bitmap, timestamp, front, generation)
-            },
-            onBusyCleared = {},
-            onError = { message -> mainHandler.post { fail(message) } },
-            onBound = { front, message ->
-                mainHandler.post {
-                    runtime.phase.value = ServicePhase.RUNNING
-                    runtime.usingFrontCamera.value = front
-                    runtime.cameraMessage.value = message
-                    refreshStatus()
+        runtime.session.value = session
+        val initial = container.settingsRepository.settings.first()
+        if (stopped.get()) return
+        jobs += lifecycleScope.launch {
+            combine(container.settingsRepository.settings, runtime.labActive) { settings, lab -> settings to lab }
+                .collect { (settings, lab) ->
+                    dispatcher.bindings = settings.bindings
+                    dispatcher.cooldownMs = settings.cooldownMs
+                    val hints = dispatcher.engineHints()
+                    // The test page shows double taps for every finger, so it always waits for them.
+                    val config = settings.toHandConfig().withHints(
+                        if (lab) hints.copy(doubleTapFingers = Finger.TOUCHABLE.toSet()) else hints,
+                    )
+                    session.updateConfig(config)
+                    session.updateTrackerOptions(settings.trackerOptions())
+                    session.setFrontCamera(settings.useFrontCamera)
+                    session.setMaxFps(settings.targetFps)
+                    container.commandRouter.updateSettings(settings)
                 }
-            },
-        ).also { created ->
-            created.onGeneration = { value ->
-                generation = value
-                engine.setGeneration(value)
-            }
-            appContainer.cameraPipeline = created
         }
-        settingsJob = scope.launch {
-            appContainer.settingsRepository.settings.collect { settings ->
-                engine.updateConfig(settings.toGestureConfig())
-                appContainer.commandRouter.updateSettings(settings)
-                pipeline?.apply(settings.useFrontCamera, settings.targetFps)
-                if (appliedConfidence < 0f) {
-                    appliedConfidence = settings.modelConfidence()
-                    val opened = withContext(Dispatchers.Default) {
-                        runCatching { tracker.open(appliedConfidence) }.isSuccess
+        jobs += lifecycleScope.launch {
+            session.status.collect { status ->
+                val problem = status.problem
+                when {
+                    problem != null -> fail(problemText(problem))
+                    status.running -> {
+                        runtime.phase.value = ServicePhase.RUNNING
+                        runtime.cameraMessage.value = if (status.usedFallbackCamera) {
+                            "دوربین انتخاب‌شده نیست؛ دوربین دیگر استفاده شد"
+                        } else {
+                            null
+                        }
                     }
-                    if (!opened) {
-                        fail("مدل تشخیص دست باز نشد")
-                        return@collect
-                    }
-                    pipeline?.start(settings.useFrontCamera, settings.targetFps)
-                } else if (settings.modelConfidence() != appliedConfidence) {
-                    pendingConfidence = settings.modelConfidence()
                 }
             }
         }
-        watchJob = scope.launch {
-            while (isActive) {
-                delay(100)
-                val now = SystemClock.uptimeMillis()
-                engine.heartbeat(now)
-                pipeline?.noteHand(engine.snapshot.handPresent, now)
-                runtime.hand.value = engine.snapshot
-                if (runtime.phase.value == ServicePhase.RUNNING) refreshStatus()
-            }
+        jobs += lifecycleScope.launch {
+            combine(
+                session.state.map { it.handPresent to it.pose }.distinctUntilChanged(),
+                runtime.locked,
+                runtime.labActive,
+            ) { hand, locked, lab -> Triple(hand, locked, lab) }
+                .collect { refreshNotification() }
+        }
+        session.start(initial.useFrontCamera, initial.targetFps)
+    }
+
+    private fun setLocked(value: Boolean) {
+        runtime.locked.value = value
+        if (::dispatcher.isInitialized) dispatcher.setLocked(value)
+        refreshNotification()
+    }
+
+    private fun statusText(): String {
+        val state = session.state.value
+        return when {
+            runtime.labActive.value -> "صفحه آزمایش باز است؛ فرمانی اجرا نمی‌شود"
+            runtime.locked.value -> "کنترل حرکتی قفل است"
+            !state.handPresent -> "فعال؛ دستی دیده نمی‌شود"
+            state.pose != null -> "دست: ${PersianLabels.pose(state.pose!!)}"
+            else -> "دست دیده می‌شود"
         }
     }
 
-    private fun onHand(sample: HandSample?) {
-        val now = SystemClock.uptimeMillis()
-        if (sample != null) {
-            engine.onSample(sample, now)
-            runtime.analysisFps.value = analysisRate.mark(now)
-        }
-        runtime.hand.value = engine.snapshot
-        refreshStatus()
-    }
-
-    private fun onTrackerIdle() {
-        pipeline?.markIdle()
-        val confidence = pendingConfidence ?: return
-        pendingConfidence = null
-        appliedConfidence = confidence
-        scope.launch(Dispatchers.Default) {
-            runCatching { tracker.open(confidence) }
-            engine.setGeneration(++generation)
-        }
-    }
-
-    private fun refreshStatus() {
-        val hand = engine.snapshot
-        val listening = runtime.media.value.listenerConnected
-        val text = when {
-            hand.state == EngineState.SUSPENDED -> "کنترل معلق است"
-            !hand.handPresent -> "فعال؛ دستی دیده نمی‌شود"
-            !listening -> "دست دیده شد؛ دسترسی رسانه قطع است"
-            else -> "دست شناسایی شد"
-        }
+    private fun refreshNotification() {
+        if (!foregroundStarted || stopped.get()) return
+        val text = statusText()
         runtime.statusText.value = text
-        if (text != lastNotification && foregroundStarted) {
-            lastNotification = text
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.notify(NOTIFICATION_ID, buildNotification(text, hand.state == EngineState.SUSPENDED))
-        }
+        if (text == lastNotification) return
+        lastNotification = text
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(text))
     }
 
-    private fun promote(text: String) {
+    private fun promote() {
         val manager = getSystemService(NotificationManager::class.java)
         if (manager.getNotificationChannel(CHANNEL) == null) {
             val channel = NotificationChannel(CHANNEL, "کنترل حرکتی AirTouch", NotificationManager.IMPORTANCE_LOW)
             channel.description = "روشن بودن دوربین و کنترل حرکتی را نشان می‌دهد"
             manager.createNotificationChannel(channel)
         }
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            buildNotification(text, suspended = false),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA,
-        )
+        val text = "در حال آماده‌سازی"
+        ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(text), ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
         foregroundStarted = true
         lastNotification = text
     }
 
-    private fun buildNotification(text: String, suspended: Boolean): Notification {
+    private fun buildNotification(text: String): Notification {
         val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         val open = PendingIntent.getActivity(
             this,
@@ -242,16 +214,12 @@ class HandTrackingService : LifecycleService() {
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             flags,
         )
-        val stop = PendingIntent.getService(
-            this,
-            2,
-            Intent(this, HandTrackingService::class.java).setAction(ACTION_STOP),
-            flags,
-        )
-        val toggle = PendingIntent.getService(
+        val stop = PendingIntent.getService(this, 2, Intent(this, HandTrackingService::class.java).setAction(ACTION_STOP), flags)
+        val locked = runtime.locked.value
+        val lock = PendingIntent.getService(
             this,
             3,
-            Intent(this, HandTrackingService::class.java).setAction(if (suspended) ACTION_RESUME else ACTION_SUSPEND),
+            Intent(this, HandTrackingService::class.java).setAction(if (locked) ACTION_UNLOCK else ACTION_LOCK),
             flags,
         )
         return NotificationCompat.Builder(this, CHANNEL)
@@ -261,7 +229,7 @@ class HandTrackingService : LifecycleService() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(open)
-            .addAction(R.drawable.ic_stat_air, if (suspended) "ادامه" else "تعلیق", toggle)
+            .addAction(R.drawable.ic_stat_air, if (locked) "باز کردن قفل" else "قفل حرکات", lock)
             .addAction(R.drawable.ic_stat_air, "توقف دوربین", stop)
             .build()
     }
@@ -275,9 +243,9 @@ class HandTrackingService : LifecycleService() {
         val listener = PowerManager.OnThermalStatusChangedListener { status ->
             runtime.thermalText.value = thermalLabel(status)
             when {
-                status >= PowerManager.THERMAL_STATUS_SEVERE -> shutdown("thermal")
-                status >= PowerManager.THERMAL_STATUS_MODERATE -> pipeline?.setThermalCap(5)
-                else -> pipeline?.setThermalCap(null)
+                status >= PowerManager.THERMAL_STATUS_SEVERE -> shutdown(Reason.THERMAL)
+                status >= PowerManager.THERMAL_STATUS_MODERATE -> session.setFpsCap(8)
+                else -> session.setFpsCap(null)
             }
         }
         thermalListener = listener
@@ -286,66 +254,55 @@ class HandTrackingService : LifecycleService() {
     }
 
     private fun thermalLabel(status: Int): String = when {
-        Build.VERSION.SDK_INT < 29 -> "در این نسخه اندروید گزارش دما نیست"
         status >= PowerManager.THERMAL_STATUS_SEVERE -> "دمای گوشی بالا است"
         status >= PowerManager.THERMAL_STATUS_MODERATE -> "گوشی گرم شده و نرخ پردازش کم شده"
         else -> "دمای گوشی عادی است"
     }
 
-    private fun modelPresent(): Boolean {
-        return runCatching { assets.open(HandTracker.MODEL_ASSET).close() }.isSuccess
+    private fun problemText(problem: HandControlSession.Problem): String = when (problem) {
+        HandControlSession.Problem.MODEL_MISSING -> "مدل تشخیص دست داخل برنامه پیدا نشد"
+        HandControlSession.Problem.MODEL_FAILED -> "مدل تشخیص دست باز نشد"
+        HandControlSession.Problem.NO_CAMERA -> "این گوشی دوربین قابل استفاده ندارد"
+        HandControlSession.Problem.CAMERA_FAILED -> "دوربین در دسترس نیست یا برنامه دیگری آن را گرفته"
     }
 
     private fun fail(message: String) {
-        runtime.phase.value = ServicePhase.ERROR
         runtime.errorText.value = message
+        shutdown(Reason.ERROR)
+        runtime.phase.value = ServicePhase.ERROR
         runtime.statusText.value = message
-        shutdown("error")
     }
 
-    private fun shutdown(reason: String) {
+    private fun shutdown(reason: Reason) {
         if (!stopped.compareAndSet(false, true)) return
         runtime.phase.value = ServicePhase.STOPPING
-        settingsJob?.cancel()
-        watchJob?.cancel()
-        pipeline?.shutdown()
-        if (appContainer.cameraPipeline === pipeline) appContainer.cameraPipeline = null
-        tracker.close()
-        if (::engine.isInitialized) engine.setGeneration(generation + 1)
+        jobs.forEach { it.cancel() }
+        jobs.clear()
+        if (::session.isInitialized) {
+            session.removeListener(eventListener)
+            session.release()
+        }
         if (screenRegistered) runCatching { unregisterReceiver(screenReceiver) }
+        screenRegistered = false
         if (Build.VERSION.SDK_INT >= 29) {
             thermalListener?.let { listener ->
-                runCatching {
-                    getSystemService(PowerManager::class.java).removeThermalStatusListener(listener)
-                }
+                runCatching { getSystemService(PowerManager::class.java).removeThermalStatusListener(listener) }
             }
         }
-        appContainer.commandRouter.close()
-        scope.cancel()
-        if (reason == "thermal") {
-            runtime.errorText.value = "دما بالا رفت و دوربین برای محافظت از گوشی خاموش شد"
-        }
         runtime.resetAfterStop()
+        if (reason == Reason.THERMAL) runtime.errorText.value = "دما بالا رفت و دوربین برای محافظت از گوشی خاموش شد"
         runCatching { ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE) }
         stopSelf()
     }
 
+    private enum class Reason { USER, SCREEN, THERMAL, ERROR, DESTROY }
+
     companion object {
         const val ACTION_STOP = "com.airtouch.app.STOP"
-        const val ACTION_SUSPEND = "com.airtouch.app.SUSPEND"
-        const val ACTION_RESUME = "com.airtouch.app.RESUME"
+        const val ACTION_LOCK = "com.airtouch.app.LOCK"
+        const val ACTION_UNLOCK = "com.airtouch.app.UNLOCK"
         const val EXTRA_ALLOW_BACKGROUND = "allow_background"
         private const val CHANNEL = "airtouch_control"
         private const val NOTIFICATION_ID = 42
-    }
-}
-
-private class RateCounter {
-    private val stamps = ArrayDeque<Long>()
-
-    fun mark(now: Long): Float {
-        stamps.addLast(now)
-        while (stamps.isNotEmpty() && now - stamps.first() > 1_000) stamps.removeFirst()
-        return stamps.size.toFloat()
     }
 }

@@ -29,9 +29,9 @@ class VolumeController(context: Context) {
 
     fun remoteSnapshot(controller: MediaController): VolumeSnapshot {
         val info = controller.playbackInfo
-        val max = info?.maxVolume ?: 0
-        val current = info?.currentVolume ?: 0
-        val absolute = info?.volumeControl == VOLUME_CONTROL_ABSOLUTE
+        val max = info.maxVolume
+        val current = info.currentVolume
+        val absolute = info.volumeControl == VOLUME_CONTROL_ABSOLUTE
         return VolumeSnapshot(
             current = current,
             min = 0,
