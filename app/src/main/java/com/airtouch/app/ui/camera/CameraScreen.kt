@@ -15,6 +15,7 @@ import com.airtouch.app.ui.ChoiceRow
 import com.airtouch.app.ui.InfoCard
 import com.airtouch.app.ui.PageTitle
 import com.airtouch.app.ui.ScreenColumn
+import com.airtouch.app.ui.dimensions
 import com.airtouch.handcontrol.HandControlSession
 import com.airtouch.handcontrol.core.HandControlState
 
@@ -63,7 +64,7 @@ fun CameraScreen(
         status?.let {
             InfoCard(
                 "عملکرد",
-                "تصویر ${it.frameWidth}×${it.frameHeight}؛ تحلیل ${it.analysisFps} فریم در ثانیه؛ زمان مدل ${it.inferenceMs} میلی‌ثانیه",
+                "تصویر ${dimensions(it.frameWidth, it.frameHeight)}؛ تحلیل ${it.analysisFps} فریم در ثانیه؛ زمان مدل ${it.inferenceMs} میلی‌ثانیه",
             )
         }
         InfoCard("دما", thermal)

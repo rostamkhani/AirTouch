@@ -77,6 +77,7 @@ class HandTrackingService : LifecycleService() {
         session = HandControlSession(this, this)
         session.addListener(eventListener)
         dispatcher = GestureDispatcher(isRepeatable = { it.repeatable }) { action, trigger, _ ->
+            if (action == ControlAction.LOCK_TOGGLE) runtime.locked.value = dispatcher.locked
             container.commandRouter.perform(action, PersianLabels.trigger(trigger))
         }
         dispatcher.lockAction = ControlAction.LOCK_TOGGLE

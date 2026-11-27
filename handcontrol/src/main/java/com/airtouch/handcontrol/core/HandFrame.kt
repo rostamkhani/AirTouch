@@ -59,6 +59,10 @@ enum class FingerState { OPEN, CLOSED }
  * the user sees the preview: x grows to the user's right and y grows downward. z is MediaPipe's
  * relative depth. [world] holds MediaPipe's metric 3D landmarks centered on the hand; it may be
  * empty when only 2D points are available.
+ *
+ * [uprightRotation] is the screen rotation, in quarter turns like `Surface.ROTATION_*`, that the
+ * frame is upright for. A screen showing the camera at another rotation must turn the points by
+ * the difference; see [rotatedForScreen].
  */
 data class HandFrame(
     val timestampMs: Long,
@@ -68,6 +72,7 @@ data class HandFrame(
     val world: List<Vec3> = emptyList(),
     val handedness: Handedness = Handedness.UNKNOWN,
     val score: Float = 1f,
+    val uprightRotation: Int = 0,
 ) {
     init {
         require(image.size == HandLandmark.COUNT) { "expected ${HandLandmark.COUNT} image landmarks" }
@@ -78,5 +83,29 @@ data class HandFrame(
     fun pixel(index: Int): Vec3 {
         val point = image[index]
         return Vec3(point.x * imageWidth, point.y * imageHeight, point.z * imageWidth)
+    }
+
+    /**
+     * The same frame as it appears on a screen at [screenRotation] (quarter turns). Camera
+     * previews show the picture upright for the screen, which differs from [uprightRotation] when
+     * the phone is turned while auto-rotate is off.
+     */
+    fun rotatedForScreen(screenRotation: Int): HandFrame {
+        val turns = Math.floorMod(uprightRotation - screenRotation, 4)
+        if (turns == 0) return this
+        val points = image.map { p ->
+            when (turns) {
+                1 -> Vec3(1f - p.y, p.x, p.z)
+                2 -> Vec3(1f - p.x, 1f - p.y, p.z)
+                else -> Vec3(p.y, 1f - p.x, p.z)
+            }
+        }
+        val swap = turns % 2 == 1
+        return copy(
+            imageWidth = if (swap) imageHeight else imageWidth,
+            imageHeight = if (swap) imageWidth else imageHeight,
+            image = points,
+            uprightRotation = screenRotation,
+        )
     }
 }

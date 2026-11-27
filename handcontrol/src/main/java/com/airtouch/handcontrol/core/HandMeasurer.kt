@@ -32,6 +32,7 @@ object HandMeasurer {
     /** Finger flexion (MCP + PIP + DIP, degrees) mapped to openness 1 at [STRAIGHT_FLEX] and 0 at [CURLED_FLEX]. */
     const val STRAIGHT_FLEX = 60f
     const val CURLED_FLEX = 150f
+    private const val EDGE_MARGIN = 0.05f
 
     fun measure(frame: HandFrame): HandMeasurements? {
         val points3d = if (frame.world.size == HandLandmark.COUNT) frame.world else List(HandLandmark.COUNT) { frame.pixel(it) }
@@ -84,7 +85,10 @@ object HandMeasurer {
             cx += frame.image[index].x
             cy += frame.image[index].y
         }
-        val outside = frame.image.any { it.x < -0.02f || it.x > 1.02f || it.y < -0.02f || it.y > 1.02f }
+        // The wrist often sits below the frame when the hand is close; it does not affect the shape.
+        val outside = frame.image.withIndex().any { (index, point) ->
+            index != HandLandmark.WRIST && (point.x < -EDGE_MARGIN || point.x > 1f + EDGE_MARGIN || point.y < -EDGE_MARGIN || point.y > 1f + EDGE_MARGIN)
+        }
 
         return HandMeasurements(
             flexionDegrees = flexion,

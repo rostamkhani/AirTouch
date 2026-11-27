@@ -126,7 +126,7 @@ class PlayerConnection(private val context: Context) {
         mutableState.value = PlayerUiState(
             connected = true,
             isPlaying = player.isPlaying,
-            title = metadata.title?.toString() ?: player.currentMediaItem?.mediaMetadata?.title?.toString(),
+            title = (metadata.title ?: metadata.displayTitle)?.toString(),
             artist = metadata.artist?.toString(),
             index = player.currentMediaItemIndex,
             count = player.mediaItemCount,
@@ -143,7 +143,7 @@ class PlayerConnection(private val context: Context) {
             .setMediaId(track.uri)
             .setUri(uri)
             .setRequestMetadata(MediaItem.RequestMetadata.Builder().setMediaUri(uri).build())
-            .setMediaMetadata(MediaMetadata.Builder().setTitle(track.title).build())
+            .setMediaMetadata(MediaMetadata.Builder().setDisplayTitle(track.title).build())
             .build()
     }
 }

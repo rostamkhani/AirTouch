@@ -1,9 +1,11 @@
 package com.airtouch.handcontrol
 
 import android.content.Context
+import android.hardware.display.DisplayManager
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.Display
 import android.util.Log
 import androidx.camera.core.Preview
 import androidx.lifecycle.LifecycleOwner
@@ -210,12 +212,14 @@ class HandControlSession(
         source.start(frontCamera, maxFps)
     }
 
-    private fun onFrame(bitmap: android.graphics.Bitmap, timestampMs: Long, mirrored: Boolean) {
+    private fun onFrame(bitmap: android.graphics.Bitmap, timestampMs: Long, mirrored: Boolean, uprightTurns: Int) {
         if (!active) return
         val current = runner ?: return
         val started = SystemClock.uptimeMillis()
         val frame = try {
             current.detect(bitmap, timestampMs, mirrored)
+                ?.copy(uprightRotation = uprightTurns)
+                ?.rotatedForScreen(screenRotation())
         } catch (error: RuntimeException) {
             Log.w(TAG, "detect failed: ${error.javaClass.simpleName}")
             null
@@ -260,6 +264,10 @@ class HandControlSession(
 
     private fun modelPresent(): Boolean =
         runCatching { appContext.assets.open(options.modelAssetPath).close() }.isSuccess
+
+    private fun screenRotation(): Int =
+        appContext.getSystemService(DisplayManager::class.java)
+            ?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: 0
 
     private companion object {
         const val TAG = "HandControl"

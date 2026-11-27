@@ -3,14 +3,15 @@ package com.airtouch.app.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -121,24 +122,33 @@ fun CameraWithHand(
     frameAspect: Float,
 ) {
     val aspect = frameAspect.takeIf { it.isFinite() && it > 0f } ?: (3f / 4f)
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(max = 460.dp)
-            .aspectRatio(aspect, matchHeightConstraintsFirst = aspect > 1f)
-            .clip(RoundedCornerShape(16.dp))
-            .background(Color(0xFF14232B)),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (session != null && showPreview) {
-            HandCameraPreview(session, Modifier.matchParentSize())
-        } else {
-            Text(
-                if (session == null) "دوربین خاموش است" else "پیش‌نمایش خاموش است؛ فقط اسکلت دست نشان داده می‌شود",
-                color = Color.White,
-                modifier = Modifier.padding(24.dp),
-            )
+    BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        val width = minOf(maxWidth, 460.dp * aspect)
+        Box(
+            modifier = Modifier
+                .size(width, width / aspect)
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color(0xFF14232B)),
+            contentAlignment = Alignment.Center,
+        ) {
+            CameraContent(session, state, showPreview)
         }
-        HandSkeletonOverlay(state, Modifier.matchParentSize())
     }
 }
+
+@Composable
+private fun BoxScope.CameraContent(session: HandControlSession?, state: HandControlState, showPreview: Boolean) {
+    if (session != null && showPreview) {
+        HandCameraPreview(session, Modifier.matchParentSize())
+    } else {
+        Text(
+            if (session == null) "دوربین خاموش است" else "پیش‌نمایش خاموش است؛ فقط اسکلت دست نشان داده می‌شود",
+            color = Color.White,
+            modifier = Modifier.padding(24.dp),
+        )
+    }
+    HandSkeletonOverlay(state, Modifier.matchParentSize())
+}
+
+/** Keeps "width×height" in left-to-right order inside Persian text. */
+fun dimensions(width: Int, height: Int): String = "\u2066${width}×${height}\u2069"

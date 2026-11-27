@@ -25,8 +25,9 @@ import kotlin.math.min
 
 /**
  * Binds CameraX analysis (and an optional preview) to [lifecycleOwner] and hands each analyzed
- * frame to [onFrame] as an upright bitmap. Analysis and preview use the screen's current rotation,
- * which is tracked while the source runs, so both stay aligned when the phone turns.
+ * frame to [onFrame] as a bitmap that is upright for [uprightTurns] (quarter turns, same values as
+ * `Surface.ROTATION_*`). Analysis and preview follow the screen rotation, so the picture and the
+ * detected hand stay aligned when the phone turns.
  *
  * All public methods must be called on the main thread. [onFrame] runs on [analysisExecutor] and
  * must not keep the bitmap after it returns.
@@ -35,7 +36,7 @@ class HandCameraSource(
     private val context: Context,
     private val lifecycleOwner: LifecycleOwner,
     private val analysisExecutor: Executor,
-    private val onFrame: (bitmap: Bitmap, timestampMs: Long, mirrored: Boolean) -> Unit,
+    private val onFrame: (bitmap: Bitmap, timestampMs: Long, mirrored: Boolean, uprightTurns: Int) -> Unit,
     private val listener: Listener,
 ) {
     interface Listener {
@@ -205,7 +206,7 @@ class HandCameraSource(
             lastAcceptedAt = now
             val mirrored = boundFront
             val bitmap = converter.convert(image, mirrored)
-            onFrame(bitmap, now, mirrored)
+            onFrame(bitmap, now, mirrored, rotation)
         } finally {
             image.close()
         }

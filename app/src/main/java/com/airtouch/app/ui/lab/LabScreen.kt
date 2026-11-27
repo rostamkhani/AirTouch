@@ -40,6 +40,7 @@ import com.airtouch.app.ui.InfoCard
 import com.airtouch.app.ui.PageTitle
 import com.airtouch.app.ui.ScreenColumn
 import com.airtouch.app.ui.WideButton
+import com.airtouch.app.ui.dimensions
 import com.airtouch.handcontrol.HandControlSession
 import com.airtouch.handcontrol.PersianLabels
 import com.airtouch.handcontrol.core.Finger
@@ -222,7 +223,7 @@ private fun StatusLine(state: HandControlState, status: HandControlSession.Statu
             }
             status?.let {
                 Text(
-                    "تحلیل ${it.analysisFps} فریم در ثانیه، زمان مدل ${it.inferenceMs} میلی‌ثانیه، تصویر ${it.frameWidth}×${it.frameHeight}",
+                    "تحلیل ${it.analysisFps} فریم در ثانیه، زمان مدل ${it.inferenceMs} میلی‌ثانیه، تصویر ${dimensions(it.frameWidth, it.frameHeight)}",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

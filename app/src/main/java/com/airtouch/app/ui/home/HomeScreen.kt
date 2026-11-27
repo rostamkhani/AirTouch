@@ -48,7 +48,10 @@ fun HomeScreen(
 ) {
     ScreenColumn {
         Text("AirTouch", style = MaterialTheme.typography.displaySmall)
-        InfoCard("کنترل حرکتی", phase.labelFa() + "؛ " + status)
+        InfoCard(
+            "کنترل حرکتی",
+            if (phase == ServicePhase.RUNNING || phase == ServicePhase.STARTING) "${phase.labelFa()}؛ $status" else phase.labelFa(),
+        )
         if (!error.isNullOrBlank()) InfoCard("خطا", error)
         if (!cameraMessage.isNullOrBlank()) InfoCard("دوربین", cameraMessage)
         if (phase == ServicePhase.RUNNING) {
